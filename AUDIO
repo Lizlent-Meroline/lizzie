@@ -1,0 +1,99 @@
+import cv2
+import mediapipe as mp
+import serial
+import time
+
+# Initialize serial communication with Arduino
+arduino = serial.Serial('COM3', 9600)
+time.sleep(2)  # Wait for Arduino to initialize
+
+# Initialize Mediapipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+mp_drawing = mp.solutions.drawing_utils
+
+# Initialize webcam
+cap = cv2.VideoCapture(0)
+
+# Function to determine hand state (open or closed)
+def is_hand_open(landmarks):
+    tip_ids = [4, 8, 12, 16, 20]  # Thumb, Index, Middle, Ring, Pinky
+    open_fingers = 0
+
+    for tip_id in tip_ids[1:]:  # Exclude thumb for simplicity
+        if landmarks[tip_id].y < landmarks[tip_id - 2].y:  # Compare tip with PIP joint
+            open_fingers += 1
+
+    return open_fingers > 2  # More than 2 fingers open means hand is open
+
+# Variables to track hand motion and state
+prev_x = None
+motion = None
+hand_open = False
+previous_motion = None
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame = cv2.flip(frame, 1)  # Mirror the frame
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    result = hands.process(rgb_frame)
+
+    if result.multi_hand_landmarks:
+        for hand_landmarks in result.multi_hand_landmarks:
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            landmarks = hand_landmarks.landmark
+
+            # Determine if hand is open or closed
+            hand_open_now = is_hand_open(landmarks)
+
+            # Determine hand motion (left or right)
+            current_x = landmarks[9].x  # Use wrist (landmark 9) for motion detection
+            if prev_x is not None:
+                if current_x - prev_x > 0.02:
+                    motion = "right"
+                elif prev_x - current_x > 0.02:
+                    motion = "left"
+                else:
+                    motion = None
+
+            prev_x = current_x
+
+            # Send play command once if hand opens
+            if hand_open_now and not hand_open:
+                arduino.write(b'play\n')  # Open hand means play
+                print("Command: Play")
+                hand_open = True  # Update hand state
+
+            # Send pause command once if hand closes
+            elif not hand_open_now and hand_open:
+                arduino.write(b'pause\n')  # Closed hand means pause
+                print("Command: Pause")
+                hand_open = False  # Update hand state
+
+            # Send motion commands (next/previous) only if motion detected and it's a new motion
+            if motion == "right" and motion != previous_motion:
+                arduino.write(b'next\n')  # Wave to the right means next song
+                print("Command: Next Song")
+                previous_motion = motion  # Update previous motion to prevent repeating
+                motion = None  # Reset motion after sending command
+
+            elif motion == "left" and motion != previous_motion:
+                arduino.write(b'previous\n')  # Wave to the left means previous song
+                print("Command: Previous Song")
+                previous_motion = motion  # Update previous motion to prevent repeating
+                motion = None  # Reset motion after sending command
+
+    cv2.imshow("Hand Gesture Control", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Release resources
+cap.release()
+cv2.destroyAllWindows()
+hands.close()
+arduino.close()
